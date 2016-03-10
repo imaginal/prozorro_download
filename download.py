@@ -3,6 +3,7 @@
 from gevent import monkey
 monkey.patch_all()
 
+import time
 import os.path
 import logging
 import socket
@@ -19,10 +20,23 @@ client_config = {
     'timeout': 30,
 }
 
-document_ext = ['doc', 'docx', 'pdf', 'rtf', 'txt', 'yaml']
+document_ext = ['doc', 'docx', 'pdf', 'rtf', 'txt', 'zip',
+    'xls', 'xlsx', 'yaml', 'json']
 
+def is_ascii(s):
+    return all(ord(c) < 128 for c in s)
 
-def process_document(tender, doc):
+def wait_plist(plist, limit=20):
+    while len(plist):
+        for k in list(plist.keys()):
+            if plist[k].poll() is None:
+                continue
+            del plist[k]
+        if len(plist) < limit:
+            break
+        time.sleep(0.1)
+
+def process_document(plist, tender, doc):
     ext = doc.title.rsplit('.', 1)[1]
     if ext not in document_ext:
         return
@@ -30,14 +44,21 @@ def process_document(tender, doc):
     dir_date = tender.dateModified[:10]
     dir_name = os.path.join("out", dir_date, tender.id)
 
-    name = "{}_{}".format(doc.id[:4], doc.title)
+    if is_ascii(doc.title):
+        name = "{}_{}".format(doc.id[:4], doc.title)
+    else:
+        name = "{}.{}".format(doc.id, ext)
     file_name = os.path.join(dir_name, name)
 
     if not os.path.exists(dir_name):
         os.makedirs(dir_name)
 
-    subprocess.call("wget -nv -O '{}' {}".format(
+    p = subprocess.Popen("wget -nv -O '{}' {}".format(
         file_name, doc.url), shell=True)
+    plist[p.pid] = p
+
+    wait_plist(plist)
+    logger.info("Now %d procs", len(plist))
 
 
 def main():
@@ -52,6 +73,8 @@ def main():
         client.params['offset'] = offset
     except:
         pass
+
+    plist = dict()
 
     while True:
         tender_list = client.get_tenders()
@@ -68,7 +91,7 @@ def main():
 
                 for d in tender.documents:
                     logger.info("++ Got document %s", d.title)
-                    process_document(t, d)
+                    process_document(plist, t, d)
 
             except Exception as e:
                 logger.error("Exception {}: {}".format(type(e), e))
